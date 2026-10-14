@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Set the screen clock on the Womier K87 / QK87 keyboard from Linux.
+
+The vendor tool is Windows-only. This replays the exact USB sequence it sends
+(captured with usbmon, see docs/PROTOCOL.md): four HID feature-report control
+transfers to interface 3 of the 0C45:800B screen controller. No dependencies,
+talks to the device through usbfs.
+
+The keyboard must be connected with a USB cable in wired mode.
+"""
+import argparse
+import ctypes
+import errno
+import fcntl
+import os
+import struct
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+__version__ = "0.1.0"
+
+VID, PID, IFACE = 0x0C45, 0x800B, 3
+
+# usbfs ioctls, computed so they are correct on 32- and 64-bit kernels
+_CTRL_FMT = "@BBHHHIP"  # struct usbdevfs_ctrltransfer
+
+
+def _ioc(direction, nr, size):
+    return (direction << 30) | (size << 16) | (ord("U") << 8) | nr
+
+
+USBDEVFS_CONTROL = _ioc(3, 0, struct.calcsize(_CTRL_FMT))
+USBDEVFS_CLAIMINTERFACE = _ioc(2, 15, 4)
+USBDEVFS_RELEASEINTERFACE = _ioc(2, 16, 4)
+
+
+def build_packets(t):
+    """Return the four 64-byte feature reports for local time `t`."""
+    if not 2000 <= t.year <= 2255:
+        raise ValueError("year must be 2000..2255")
+    p = [bytearray(64) for _ in range(4)]
+    p[0][0:2] = b"\x04\x18"
+    p[1][0:2] = b"\x04\x28"
+    p[1][8] = 1
+    p[2][2] = 0x5A
+    p[2][3:11] = bytes((t.year - 2000, t.month, t.day, t.hour, t.minute,
+                        t.second, 0, t.isoweekday() % 7))  # Sunday = 0
+    p[2][62:64] = b"\xAA\x55"
+    p[3][0:2] = b"\x04\x02"
+    return [bytes(x) for x in p]
+
+
+def _read(path):
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return ""
+
+
+def find_device(force=False):
+    """Return (device node path, product name) of the keyboard's screen controller."""
+    for d in sorted(Path("/sys/bus/usb/devices").iterdir()):
+        if _read(d / "idVendor").lower() != f"{VID:04x}" or _read(d / "idProduct").lower() != f"{PID:04x}":
+            continue
+        product = _read(d / "product")
+        if not force and "WOMIER" not in product.upper():
+            continue
+        if not (d.parent / f"{d.name}:1.{IFACE}").exists():
+            sys.exit(f"{d.name}: device has no interface {IFACE}; unsupported firmware? "
+                     "Please open an issue with the output of `lsusb -v -d 0c45:800b`.")
+        bus, dev = int(_read(d / "busnum")), int(_read(d / "devnum"))
+        return Path(f"/dev/bus/usb/{bus:03d}/{dev:03d}"), product
+    sys.exit("Womier keyboard (USB 0c45:800b) not found. Connect it with a USB cable "
+             "and set the mode switch to USB (wired).")
+
+
+def _control(fd, request_type, request, value, index, data, length):
+    buf = (ctypes.c_char * length)()
+    if data is not None:
+        ctypes.memmove(buf, data, len(data))
+    req = bytearray(struct.pack(_CTRL_FMT, request_type, request, value, index,
+                                length, 2000, ctypes.addressof(buf)))
+    return fcntl.ioctl(fd, USBDEVFS_CONTROL, req), bytes(buf)
+
+
+def send(node, packets):
+    try:
+        fd = os.open(node, os.O_RDWR)
+    except PermissionError:
+        sys.exit(f"No permission to open {node}. Install the udev rule (see README), "
+                 "or run with sudo.")
+    except OSError as e:
+        sys.exit(f"Cannot open {node}: {e.strerror}")
+    try:
+        try:
+            fcntl.ioctl(fd, USBDEVFS_CLAIMINTERFACE, struct.pack("I", IFACE))
+        except OSError as e:
+            if e.errno == errno.EBUSY:
+                sys.exit(f"Interface {IFACE} is in use by another driver or program.")
+            raise
+        try:
+            for i, pkt in enumerate(packets, 1):
+                time.sleep(0.035)
+                # SET_REPORT (feature type 3, report ID 0), then read the reply like the vendor app
+                n, _ = _control(fd, 0x21, 0x09, 0x0300, IFACE, pkt, 64)
+                if n != 64:
+                    sys.exit(f"step {i}: short transfer ({n}/64 bytes)")
+                time.sleep(0.035)
+                _control(fd, 0xA1, 0x01, 0x0300, IFACE, None, 64)
+        finally:
+            fcntl.ioctl(fd, USBDEVFS_RELEASEINTERFACE, struct.pack("I", IFACE))
+    except OSError as e:
+        sys.exit(f"USB transfer failed: {e}")
+    finally:
+        os.close(fd)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--at", type=datetime.fromisoformat, metavar="ISO_TIME",
+                    help="set this local time instead of now, e.g. 2026-10-14T03:33:33 (for testing)")
+    ap.add_argument("--dry-run", action="store_true", help="print the packets, send nothing")
+    ap.add_argument("--device", type=Path, metavar="PATH",
+                    help="usbfs node, e.g. /dev/bus/usb/002/034 (default: auto-detect)")
+    ap.add_argument("--force", action="store_true",
+                    help="skip the 'WOMIER' product-name check (other 0c45:800b keyboards)")
+    ap.add_argument("--version", action="version", version=__version__)
+    args = ap.parse_args(argv)
+
+    t = (args.at or datetime.now()).replace(microsecond=0)
+    if t.tzinfo is not None:
+        ap.error("--at must be a local time without a UTC offset")
+    packets = build_packets(t)
+    if args.dry_run:
+        for i, pkt in enumerate(packets, 1):
+            print(i, pkt.hex(" "))
+        return 0
+    node, product = (args.device, "") if args.device else find_device(args.force)
+    print(f"Setting {product or node} to {t.isoformat(sep=' ')}")
+    send(node, packets)
+    print("Done.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

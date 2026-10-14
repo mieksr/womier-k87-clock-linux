@@ -1,0 +1,26 @@
+# Maintainer: mieksr <https://github.com/mieksr>
+pkgname=womier-k87-clock-linux
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Set the screen clock on the Womier K87/QK87 keyboard from Linux'
+arch=('any')
+url='https://github.com/mieksr/womier-k87-clock-linux'
+license=('MIT')
+depends=('python' 'systemd')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')  # replace with the real checksum after tagging: updpkgsums
+
+check() {
+  cd "$pkgname-$pkgver"
+  python -I -m unittest discover -s tests
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 womier-clock-sync "$pkgdir/usr/bin/womier-clock-sync"
+  install -Dm644 70-womier-clock.rules "$pkgdir/usr/lib/udev/rules.d/70-womier-clock.rules"
+  install -Dm644 womier-clock-sync.service "$pkgdir/usr/lib/systemd/system/womier-clock-sync.service"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 docs/PROTOCOL.md "$pkgdir/usr/share/doc/$pkgname/PROTOCOL.md"
+}

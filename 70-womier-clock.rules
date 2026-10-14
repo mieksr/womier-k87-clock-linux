@@ -1,0 +1,4 @@
+# Womier K87 / QK87 screen controller (SONiX 0c45:800b)
+# - uaccess: the logged-in user may run womier-clock-sync without sudo
+# - systemd: sync the screen clock whenever the keyboard is plugged in (wired mode)
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0c45", ATTR{idProduct}=="800b", ATTR{product}=="*WOMIER*", TAG+="uaccess", TAG+="systemd", ENV{SYSTEMD_WANTS}+="womier-clock-sync.service"

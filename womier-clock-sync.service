@@ -1,0 +1,8 @@
+[Unit]
+Description=Sync Womier keyboard screen clock
+
+[Service]
+Type=oneshot
+# Let the keyboard finish enumerating all of its USB interfaces
+ExecStartPre=/usr/bin/sleep 4
+ExecStart=/usr/bin/womier-clock-sync
